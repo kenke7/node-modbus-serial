@@ -352,8 +352,8 @@ function _onReceive(data) {
     let error;
 
     // set locale helpers variables
-    const transaction = modbus._transactions[modbus._port._transactionIdRead];
-
+    const transaction = modbus._transactions[modbus._port.txnEnabled ?
+        modbus._port._transactionIdRead : modbus._port._transactionIdWrite - 1]
     // the _transactionIdRead can be missing, ignore wrong transaction it's
     if (!transaction) {
         return;
@@ -664,7 +664,8 @@ class ModbusRTU extends EventEmitter {
             this._port.close(callback);
         } else {
             // nothing needed to be done
-            callback();
+            if (callback)
+                callback();
         }
     }
 
@@ -684,7 +685,8 @@ class ModbusRTU extends EventEmitter {
             this._port.destroy(callback);
         } else {
             // nothing needed to be done
-            callback();
+            if (callback)
+                callback();
         }
     }
 

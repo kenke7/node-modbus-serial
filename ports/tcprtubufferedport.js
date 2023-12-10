@@ -8,11 +8,12 @@ const crc16 = require("../utils/crc16");
 
 /* TODO: const should be set once, maybe */
 const EXCEPTION_LENGTH = 3;
-const MIN_DATA_LENGTH = 6;
-const MIN_MBAP_LENGTH = 6;
+const MIN_DATA_LENGTH = 8;
+const MIN_MBAP_LENGTH = 0;
 const MAX_TRANSACTIONS = 64; // maximum transaction to wait for
-const MAX_BUFFER_LENGTH = 256;
+const MAX_BUFFER_LENGTH = 9;
 const CRC_LENGTH = 2;
+const TXN_ENABLED = MIN_MBAP_LENGTH > 0;
 
 const MODBUS_PORT = 502;
 
@@ -89,7 +90,7 @@ class TcpRTUBufferedPort extends EventEmitter {
             let bufferLength = modbus._buffer.length;
 
             // check data length
-            if (bufferLength < MIN_MBAP_LENGTH) return;
+            if (bufferLength < Math.max(MIN_MBAP_LENGTH, MIN_MBAP_LENGTH + EXCEPTION_LENGTH, MIN_DATA_LENGTH)) return;
 
             // check buffer size for MAX_BUFFER_SIZE
             if (bufferLength > MAX_BUFFER_LENGTH) {
@@ -97,16 +98,13 @@ class TcpRTUBufferedPort extends EventEmitter {
                 bufferLength = MAX_BUFFER_LENGTH;
             }
 
-            // check data length
-            if (bufferLength < MIN_MBAP_LENGTH + EXCEPTION_LENGTH) return;
-
             // loop and check length-sized buffer chunks
             const maxOffset = bufferLength - MIN_MBAP_LENGTH;
             for (let i = 0; i <= maxOffset; i++) {
-                modbus._transactionIdRead = modbus._buffer.readUInt16BE(i);
-                const protocolID = modbus._buffer.readUInt16BE(i + 2);
-                const msgLength = modbus._buffer.readUInt16BE(i + 4);
-                const cmd = modbus._buffer[i + 7];
+                const protocolID = TXN_ENABLED ? modbus._buffer.readUInt16BE(i + 2) : 0
+                const msgLength = TXN_ENABLED ? modbus._buffer.readUInt16BE(i + 4) : bufferLength - CRC_LENGTH;
+                const cmd = TXN_ENABLED ? modbus._buffer[i + 7] : modbus._buffer.readUInt8(i + 1);
+                modbus._transactionIdRead = TXN_ENABLED ? modbus._buffer.readUInt16BE(i += 2) : null;
 
                 modbusSerialDebug({
                     protocolID: protocolID,
@@ -121,8 +119,10 @@ class TcpRTUBufferedPort extends EventEmitter {
                     msgLength >= EXCEPTION_LENGTH &&
                     i + MIN_MBAP_LENGTH + msgLength <= bufferLength
                 ) {
-                    // add crc and emit
-                    modbus._emitData(i + MIN_MBAP_LENGTH, msgLength);
+                    // remove crc and emit
+                    let msgData = modbus._buffer.slice(i + MIN_MBAP_LENGTH, i + MIN_MBAP_LENGTH + msgLength);
+                    modbus._buffer = modbus._buffer.slice(bufferLength);
+                    modbus._emitData(msgData);
                     return;
                 }
             }
@@ -163,18 +163,13 @@ class TcpRTUBufferedPort extends EventEmitter {
     }
 
     /**
-     * Emit the received response, cut the buffer and reset the internal vars.
+     * Emit the received response.
      *
-     * @param {number} start the start index of the response within the buffer
-     * @param {number} length the length of the response
+     * @param {buffer} data the data to emit
      * @private
      */
-    _emitData(start, length) {
+    _emitData(data) {
         const modbus = this;
-        const data = modbus._buffer.slice(start, start + length);
-
-        // cut the buffer
-        modbus._buffer = modbus._buffer.slice(start + length);
 
         if (data.length > 0) {
             const buffer = Buffer.alloc(data.length + CRC_LENGTH);
@@ -193,7 +188,7 @@ class TcpRTUBufferedPort extends EventEmitter {
                 transactionId: modbus._transactionIdRead
             });
         } else {
-            modbusSerialDebug({ action: "emit data to short", data: data });
+            modbusSerialDebug({ action: "emit empty data" });
         }
     }
 
@@ -252,12 +247,15 @@ class TcpRTUBufferedPort extends EventEmitter {
             return;
         }
 
-        // remove crc and add mbap
-        const buffer = Buffer.alloc(data.length + MIN_MBAP_LENGTH - CRC_LENGTH);
-        buffer.writeUInt16BE(this._transactionIdWrite, 0);
-        buffer.writeUInt16BE(0, 2);
-        buffer.writeUInt16BE(data.length - CRC_LENGTH, 4);
-        data.copy(buffer, MIN_MBAP_LENGTH);
+        const buffer = TXN_ENABLED ? Buffer.alloc(data.length + MIN_MBAP_LENGTH - CRC_LENGTH) : Buffer.alloc(data.length);
+        if (TXN_ENABLED) {
+            buffer.writeUInt16BE(this._transactionIdWrite, 0);
+            buffer.writeUInt16BE(0, 2);
+            buffer.writeUInt16BE(data.length - CRC_LENGTH, 4);
+            data.copy(buffer, MIN_MBAP_LENGTH);
+        } else {
+            data.copy(buffer, 0);
+        }
 
         modbusSerialDebug({
             action: "send tcp rtu buffered port",
