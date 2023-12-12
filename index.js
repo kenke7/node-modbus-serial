@@ -289,9 +289,7 @@ function _readFC43(data, modbus, next) {
  * @param {Buffer} buffer The data to send
  * @private
  */
-function _writeBufferToPort(buffer, transactionId) {
-    const transaction = this._transactions[transactionId];
-
+function _writeBufferToPort(buffer, transaction) {
     if (transaction) {
         transaction._timeoutFired = false;
         transaction._timeoutHandle = _startTimeout(this._timeout, transaction);
@@ -351,10 +349,27 @@ function _onReceive(data) {
     const modbus = this;
     let error;
 
+    modbusSerialDebug({action: "client received data", data: data});
+
+    /* check message CRC
+     * if CRC is bad raise an error
+     */
+    const crcIn = data.readUInt16LE(data.length - 2);
+    if (crcIn !== crc16(data.slice(0, -2))) {
+        error = "CRC error";
+        next(new Error(error));
+        return;
+    }
+
+    // if crc is OK, read address and function code
+    const address = data.readUInt8(0);
+    const code = data.readUInt8(1);
+
+    modbusSerialDebug({address: address, code: code});
+
     // set locale helpers variables
-    const transaction = modbus._transactions[modbus._port.txnEnabled ?
-        modbus._port._transactionIdRead : modbus._port._transactionIdWrite - 1]
-    // the _transactionIdRead can be missing, ignore wrong transaction it's
+    const transaction = modbus._dequeueTransaction(address + "-" + code);
+
     if (!transaction) {
         return;
     }
@@ -406,20 +421,6 @@ function _onReceive(data) {
         next(new Error(error));
         return;
     }
-
-    /* check message CRC
-     * if CRC is bad raise an error
-     */
-    const crcIn = data.readUInt16LE(data.length - 2);
-    if (crcIn !== crc16(data.slice(0, -2))) {
-        error = "CRC error";
-        next(new Error(error));
-        return;
-    }
-
-    // if crc is OK, read address and function code
-    const address = data.readUInt8(0);
-    const code = data.readUInt8(1);
 
     /* check for modbus exception
      */
@@ -577,6 +578,34 @@ class ModbusRTU extends EventEmitter {
         this._onError = _onError.bind(this);
     }
 
+    _enqueueTransaction(id, transaction) {
+        this._transactions[id] = this._transactions[id] || [];
+        this._transactions[id].push(transaction);
+
+        modbusSerialDebug({
+            action: '_enqueueTransaction',
+            transaction: transaction,
+            id: id,
+            _transactions: this._transactions
+        });
+    }
+
+    _dequeueTransaction(id) {
+        let transaction = null;
+        if (this._transactions[id]) {
+            transaction =  this._transactions[id].shift();
+        }
+
+        modbusSerialDebug({
+            action: '_dequeueTransaction',
+            transaction: transaction,
+            id: id,
+            _transactions: this._transactions
+        });
+
+        return transaction;
+    }
+
     /**
      * Open the serial port and register Modbus parsers
      *
@@ -727,12 +756,13 @@ class ModbusRTU extends EventEmitter {
         code = code || 2;
 
         // set state variables
-        this._transactions[this._port._transactionIdWrite] = {
+        let transaction = {
             nextAddress: address,
             nextCode: code,
             nextLength: 3 + parseInt((length - 1) / 8 + 1) + 2,
             next: next
         };
+        this._enqueueTransaction(address + "-" + code, transaction);
 
         const codeLength = 6;
         const buf = Buffer.alloc(codeLength + 2); // add 2 crc bytes
@@ -746,7 +776,7 @@ class ModbusRTU extends EventEmitter {
         buf.writeUInt16LE(crc16(buf.slice(0, -2)), codeLength);
 
         // write buffer to serial port
-        _writeBufferToPort.call(this, buf, this._port._transactionIdWrite);
+        _writeBufferToPort.call(this, buf, transaction);
     }
 
     /**
@@ -791,13 +821,14 @@ class ModbusRTU extends EventEmitter {
         }
 
         // set state variables
-        this._transactions[this._port._transactionIdWrite] = {
+        let transaction = {
             nextAddress: address,
             nextDataAddress: dataAddress,
             nextCode: code,
             nextLength: 3 + (valueSize * length) + 2,
             next: next
         };
+        this._enqueueTransaction(address + "-" + code, transaction);
 
         const codeLength = 6;
         const buf = Buffer.alloc(codeLength + 2); // add 2 crc bytes
@@ -811,7 +842,7 @@ class ModbusRTU extends EventEmitter {
         buf.writeUInt16LE(crc16(buf.slice(0, -2)), codeLength);
 
         // write buffer to serial port
-        _writeBufferToPort.call(this, buf, this._port._transactionIdWrite);
+        _writeBufferToPort.call(this, buf, transaction);
     }
 
     /**
@@ -838,12 +869,13 @@ class ModbusRTU extends EventEmitter {
         const code = 5;
 
         // set state variables
-        this._transactions[this._port._transactionIdWrite] = {
+        let transaction = {
             nextAddress: address,
             nextCode: code,
             nextLength: 8,
             next: next
         };
+        this._enqueueTransaction(address + "-" + code, transaction);
 
         const codeLength = 6;
         const buf = Buffer.alloc(codeLength + 2); // add 2 crc bytes
@@ -862,7 +894,7 @@ class ModbusRTU extends EventEmitter {
         buf.writeUInt16LE(crc16(buf.slice(0, -2)), codeLength);
 
         // write buffer to serial port
-        _writeBufferToPort.call(this, buf, this._port._transactionIdWrite);
+        _writeBufferToPort.call(this, buf, transaction);
     }
 
     /**
@@ -894,13 +926,14 @@ class ModbusRTU extends EventEmitter {
         }
 
         // set state variables
-        this._transactions[this._port._transactionIdWrite] = {
+        let transaction = {
             nextAddress: address,
             nextDataAddress: dataAddress,
             nextCode: code,
             nextLength: valueSize,
             next: next
         };
+        this._enqueueTransaction(address + "-" + code, transaction);
 
         let codeLength = 6; // 1B deviceAddress + 1B functionCode + 2B dataAddress + (2B value | 4B value (enron))
         if (this._enron && !(dataAddress >= this._enronTables.shortRange[0] && dataAddress <= this._enronTables.shortRange[1])) {
@@ -925,7 +958,7 @@ class ModbusRTU extends EventEmitter {
         buf.writeUInt16LE(crc16(buf.slice(0, -2)), codeLength);
 
         // write buffer to serial port
-        _writeBufferToPort.call(this, buf, this._port._transactionIdWrite);
+        _writeBufferToPort.call(this, buf, transaction);
     }
 
     /**
@@ -953,12 +986,13 @@ class ModbusRTU extends EventEmitter {
         let i = 0;
 
         // set state variables
-        this._transactions[this._port._transactionIdWrite] = {
+        let transaction = {
             nextAddress: address,
             nextCode: code,
             nextLength: 8,
             next: next
         };
+        this._enqueueTransaction(address + "-" + code, transaction);
 
         const dataBytes = Math.ceil(array.length / 8);
         const codeLength = 7 + dataBytes;
@@ -987,7 +1021,7 @@ class ModbusRTU extends EventEmitter {
         buf.writeUInt16LE(crc16(buf.slice(0, -2)), codeLength);
 
         // write buffer to serial port
-        _writeBufferToPort.call(this, buf, this._port._transactionIdWrite);
+        _writeBufferToPort.call(this, buf, transaction);
     }
 
     /**
@@ -1014,12 +1048,13 @@ class ModbusRTU extends EventEmitter {
         const code = 16;
 
         // set state variables
-        this._transactions[this._port._transactionIdWrite] = {
+        let transaction = {
             nextAddress: address,
             nextCode: code,
             nextLength: 8,
             next: next
         };
+        this._enqueueTransaction(address + "-" + code, transaction);
 
         let dataLength = array.length;
         if (Buffer.isBuffer(array)) {
@@ -1049,7 +1084,7 @@ class ModbusRTU extends EventEmitter {
         buf.writeUInt16LE(crc16(buf.slice(0, -2)), codeLength);
 
         // write buffer to serial port
-        _writeBufferToPort.call(this, buf, this._port._transactionIdWrite);
+        _writeBufferToPort.call(this, buf, transaction);
     }
 
     /**
@@ -1068,12 +1103,13 @@ class ModbusRTU extends EventEmitter {
         const code = 17;
 
         // set state variables
-        this._transactions[this._port._transactionIdWrite] = {
+        let transaction = {
             nextAddress: address,
             nextCode: code,
             lengthUnknown: true,
             next: next
         };
+        this._enqueueTransaction(address + "-" + code, transaction);
 
         const codeLength = 2;
         const buf = Buffer.alloc(codeLength + 2); // add 2 crc bytes
@@ -1085,7 +1121,7 @@ class ModbusRTU extends EventEmitter {
         buf.writeUInt16LE(crc16(buf.slice(0, -2)), codeLength);
 
         // write buffer to serial port
-        _writeBufferToPort.call(this, buf, this._port._transactionIdWrite);
+        _writeBufferToPort.call(this, buf, transaction);
     }
 
 
@@ -1110,12 +1146,14 @@ class ModbusRTU extends EventEmitter {
         const byteCount = 7;
         const chunck = 100;
 
-        this._transactions[this._port._transactionIdWrite] = {
+        let transaction = {
             nextAddress: address,
             nextCode: code,
             lengthUnknown: true,
             next: next
         };
+        this._enqueueTransaction(address + "-" + code, transaction);
+
         const buf = Buffer.alloc(codeLength + 2); // add 2 crc bytes
         buf.writeUInt8(address, 0);
         buf.writeUInt8(code, 1);
@@ -1125,7 +1163,7 @@ class ModbusRTU extends EventEmitter {
         buf.writeUInt16BE(recordNumber, 6);
         buf.writeUInt8(chunck, 9);
         buf.writeUInt16LE(crc16(buf.slice(0, -2)), codeLength);
-        _writeBufferToPort.call(this, buf, this._port._transactionIdWrite);
+        _writeBufferToPort.call(this, buf, transaction);
     }
 
     /**
@@ -1146,12 +1184,14 @@ class ModbusRTU extends EventEmitter {
         const code = 0x2B; // 43
 
         // set state variables
-        this._transactions[this._port._transactionIdWrite] = {
+        let transaction = {
             nextAddress: address,
             nextCode: code,
             lengthUnknown: true,
             next: next
         };
+        this._enqueueTransaction(address + "-" + code, transaction);
+
         const codeLength = 5;
         const buf = Buffer.alloc(codeLength + 2); // add 2 crc bytes
         buf.writeUInt8(address, 0);
@@ -1162,7 +1202,7 @@ class ModbusRTU extends EventEmitter {
         // add crc bytes to buffer
         buf.writeUInt16LE(crc16(buf.slice(0, -2)), codeLength);
         // write buffer to serial port
-        _writeBufferToPort.call(this, buf, this._port._transactionIdWrite);
+        _writeBufferToPort.call(this, buf, transaction);
     }
 }
 

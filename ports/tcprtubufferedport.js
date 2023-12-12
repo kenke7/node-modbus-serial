@@ -13,7 +13,7 @@ const MIN_MBAP_LENGTH = 0;
 const MAX_TRANSACTIONS = 64; // maximum transaction to wait for
 const MAX_BUFFER_LENGTH = 9;
 const CRC_LENGTH = 2;
-const TXN_ENABLED = MIN_MBAP_LENGTH > 0;
+const TXN_ENABLED = false;
 
 const MODBUS_PORT = 502;
 
@@ -179,14 +179,13 @@ class TcpRTUBufferedPort extends EventEmitter {
             const crc = crc16(buffer.slice(0, -CRC_LENGTH));
             buffer.writeUInt16LE(crc, buffer.length - CRC_LENGTH);
 
-            modbus.emit("data", buffer);
-
-            // debug
             modbusSerialDebug({
                 action: "parsed tcp buffered port",
                 buffer: buffer,
                 transactionId: modbus._transactionIdRead
             });
+
+            modbus.emit("data", buffer);
         } else {
             modbusSerialDebug({ action: "emit empty data" });
         }
@@ -264,12 +263,13 @@ class TcpRTUBufferedPort extends EventEmitter {
             transactionsId: this._transactionIdWrite
         });
 
-        // get next transaction id
-        this._transactionIdWrite =
-            (this._transactionIdWrite + 1) % MAX_TRANSACTIONS;
-
         // send buffer to slave
         this._client.write(buffer);
+
+        if (TXN_ENABLED) {
+            // get next transaction id
+            this._transactionIdWrite = (this._transactionIdWrite + 1) % MAX_TRANSACTIONS;
+        }
     }
 }
 
