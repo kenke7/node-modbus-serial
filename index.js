@@ -287,12 +287,13 @@ function _readFC43(data, modbus, next) {
 /**
  * Wrapper method for writing to a port with timeout. <code><b>[this]</b></code> has the context of ModbusRTU
  * @param {Buffer} buffer The data to send
+ * @param {Transaction} transaction the wiring transaction
  * @private
  */
 function _writeBufferToPort(buffer, transaction) {
     if (transaction) {
         transaction._timeoutFired = false;
-        transaction._timeoutHandle = _startTimeout(this._timeout, transaction);
+        transaction._timeoutHandle = _startTimeout(this._port, this._timeout, transaction);
 
         // If in debug mode, stash a copy of the request payload
         if (this._debugEnabled) {
@@ -305,27 +306,37 @@ function _writeBufferToPort(buffer, transaction) {
 }
 
 /**
+ * To make an arbitrary buffer indicating timeout
+ * @param {number} address The address
+ * @param {number} fc The function code
+ * @private
+ */
+function _makeBuffer(address, fc) {
+    const codeLength = 7;
+    let buf = Buffer.alloc(codeLength + 2);
+    buf.writeUInt8(address, 0);
+    buf.writeUInt8(fc, 1);
+    buf.writeUInt8(4, 2);
+    buf.writeFloatBE(-99999.99999, 3);
+    buf.writeUInt16LE(crc16(buf.slice(0, -2)), codeLength);
+    return buf;
+}
+
+/**
  * Starts the timeout timer with the given duration.
  * If the timeout ends before it was cancelled, it will call the callback with an error.
+ * @param {SerialPort} port the serial port to use. 
  * @param {number} duration the timeout duration in milliseconds.
  * @param {Function} next the function to call next.
  * @return {number} The handle of the timeout
  * @private
  */
-function _startTimeout(duration, transaction) {
+function _startTimeout(port, duration, transaction) {
     if (!duration) {
         return undefined;
     }
     return setTimeout(function() {
-        transaction._timeoutFired = true;
-        if (transaction.next) {
-            const err = new TransactionTimedOutError();
-            if (transaction.request && transaction.responses) {
-                err.modbusRequest = transaction.request;
-                err.modbusResponses = transaction.responses;
-            }
-            transaction.next(err);
-        }
+        port.emit('data', _makeBuffer(transaction.nextAddress, transaction.nextCode));
     }, duration);
 }
 
@@ -594,6 +605,9 @@ class ModbusRTU extends EventEmitter {
         let transaction = null;
         if (this._transactions[id]) {
             transaction =  this._transactions[id].shift();
+            if (this._transactions[id].length === 0) {
+                delete this._transactions[id];
+            }
         }
 
         modbusSerialDebug({
