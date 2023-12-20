@@ -313,11 +313,12 @@ function _writeBufferToPort(buffer, transaction) {
  */
 function _makeBuffer(address, fc) {
     const codeLength = 7;
+    const nanBuf = Buffer.from([0xff, 0xff, 0xff, 0xff]);
     let buf = Buffer.alloc(codeLength + 2);
     buf.writeUInt8(address, 0);
     buf.writeUInt8(fc, 1);
     buf.writeUInt8(4, 2);
-    buf.writeFloatBE(-99999.99999, 3);
+    nanBuf.copy(buf, 3);
     buf.writeUInt16LE(crc16(buf.slice(0, -2)), codeLength);
     return buf;
 }

@@ -1,6 +1,6 @@
 {
   "name": "@kenke7/modbus-serial",
-  "version": "8.1.5",
+  "version": "8.1.6",
   "description": "A pure JavaScript implemetation of MODBUS-RTU (Serial and TCP) for NodeJS.",
   "main": "index.js",
   "scripts": {
